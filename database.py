@@ -72,6 +72,8 @@ def init_db(conn: sqlite3.Connection):
             value TEXT
         );
     """)
+    _migrate_add_terminal_mode(conn)
+    _migrate_add_run_terminal_mode(conn)
     # Seed default settings
     defaults = {
         "check_interval_seconds": "30",
@@ -88,6 +90,22 @@ def init_db(conn: sqlite3.Connection):
             "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v)
         )
     conn.commit()
+
+
+def _migrate_add_terminal_mode(conn: sqlite3.Connection):
+    """Add terminal_mode column to schedules table if it doesn't exist."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(schedules)").fetchall()]
+    if "terminal_mode" not in cols:
+        conn.execute("ALTER TABLE schedules ADD COLUMN terminal_mode TEXT NOT NULL DEFAULT 'headless'")
+        conn.commit()
+
+
+def _migrate_add_run_terminal_mode(conn: sqlite3.Connection):
+    """Add terminal_mode column to runs table if it doesn't exist."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
+    if "terminal_mode" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN terminal_mode TEXT NOT NULL DEFAULT 'headless'")
+        conn.commit()
 
 
 # ── Settings ──────────────────────────────────────────────────────────────
@@ -114,11 +132,12 @@ def create_schedule(
     scheduled_time: str,
     day_of_week: Optional[int],
     prompts: list[str],
+    terminal_mode: str = "headless",
 ) -> int:
     cur = conn.execute(
-        """INSERT INTO schedules(name, working_dir, frequency, scheduled_time, day_of_week)
-           VALUES (?, ?, ?, ?, ?)""",
-        (name, working_dir, frequency, scheduled_time, day_of_week),
+        """INSERT INTO schedules(name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode),
     )
     schedule_id = cur.lastrowid
     for i, prompt in enumerate(prompts):
@@ -139,11 +158,12 @@ def update_schedule(
     scheduled_time: str,
     day_of_week: Optional[int],
     prompts: list[str],
+    terminal_mode: str = "headless",
 ):
     conn.execute(
         """UPDATE schedules SET name=?, working_dir=?, frequency=?, scheduled_time=?,
-           day_of_week=?, updated_at=datetime('now') WHERE id=?""",
-        (name, working_dir, frequency, scheduled_time, day_of_week, schedule_id),
+           day_of_week=?, terminal_mode=?, updated_at=datetime('now') WHERE id=?""",
+        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode, schedule_id),
     )
     conn.execute("DELETE FROM schedule_prompts WHERE schedule_id=?", (schedule_id,))
     for i, prompt in enumerate(prompts):
@@ -202,9 +222,9 @@ def get_schedule(conn: sqlite3.Connection, schedule_id: int) -> Optional[dict]:
 
 # ── Runs ──────────────────────────────────────────────────────────────────
 
-def create_run(conn: sqlite3.Connection, schedule_id: int) -> int:
+def create_run(conn: sqlite3.Connection, schedule_id: int, terminal_mode: str = "headless") -> int:
     cur = conn.execute(
-        "INSERT INTO runs(schedule_id) VALUES (?)", (schedule_id,)
+        "INSERT INTO runs(schedule_id, terminal_mode) VALUES (?, ?)", (schedule_id, terminal_mode)
     )
     conn.commit()
     return cur.lastrowid

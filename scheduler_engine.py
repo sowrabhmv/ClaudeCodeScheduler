@@ -10,7 +10,7 @@ from database import (
     get_connection, get_all_schedules, get_schedule, get_setting,
     create_run, finish_run, create_prompt_result, update_prompt_result,
 )
-from claude_runner import run_prompt, PromptResponse
+from claude_runner import run_prompt, run_prompt_visible, run_interactive, PromptResponse
 
 log = logging.getLogger("scheduler_engine")
 
@@ -155,11 +155,12 @@ class SchedulerEngine:
 
     def _execute_schedule(self, sched: dict):
         schedule_id = sched["id"]
+        terminal_mode = sched.get("terminal_mode", "headless")
         conn = get_connection(self.db_path)
         try:
             claude_exe = get_setting(conn, "claude_executable", "claude")
             skip_perms = get_setting(conn, "dangerously_skip_permissions", "true") == "true"
-            run_id = create_run(conn, schedule_id)
+            run_id = create_run(conn, schedule_id, terminal_mode=terminal_mode)
             self._notify("run_started", schedule_id=schedule_id, run_id=run_id)
 
             prompts = sched.get("prompts", [])
@@ -168,69 +169,12 @@ class SchedulerEngine:
                 self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status="error")
                 return
 
-            session_id = None
-            total_cost = 0.0
-            all_success = True
-            any_success = False
-
-            for i, prompt in enumerate(prompts):
-                pr_id = create_prompt_result(
-                    conn, run_id, prompt["id"], prompt["prompt_order"], prompt["prompt_text"]
-                )
-                update_prompt_result(conn, pr_id, "running")
-                self._notify("prompt_started", schedule_id=schedule_id, run_id=run_id, prompt_order=i)
-
-                resp = run_prompt(
-                    prompt_text=prompt["prompt_text"],
-                    working_dir=sched["working_dir"],
-                    session_id=session_id,
-                    claude_executable=claude_exe,
-                    skip_permissions=skip_perms,
-                )
-
-                if resp.success:
-                    update_prompt_result(
-                        conn, pr_id, "success",
-                        result_text=resp.result_text,
-                        result_json=resp.result_json,
-                        cost_usd=resp.cost_usd,
-                        duration_ms=resp.duration_ms,
-                    )
-                    if resp.session_id:
-                        session_id = resp.session_id
-                    total_cost += resp.cost_usd
-                    any_success = True
-                else:
-                    update_prompt_result(
-                        conn, pr_id, "failure",
-                        error_message=resp.error_message,
-                        cost_usd=resp.cost_usd,
-                        duration_ms=resp.duration_ms,
-                    )
-                    total_cost += resp.cost_usd
-                    all_success = False
-                    # Skip remaining prompts
-                    for j in range(i + 1, len(prompts)):
-                        skip_id = create_prompt_result(
-                            conn, run_id, prompts[j]["id"],
-                            prompts[j]["prompt_order"], prompts[j]["prompt_text"],
-                        )
-                        update_prompt_result(conn, skip_id, "skipped",
-                                             error_message="Skipped due to previous failure")
-                    break
-
-                self._notify("prompt_finished", schedule_id=schedule_id, run_id=run_id, prompt_order=i)
-
-            # Determine overall status
-            if all_success:
-                status = "success"
-            elif any_success:
-                status = "partial_failure"
+            if terminal_mode == "interactive":
+                self._execute_interactive(conn, sched, run_id, prompts, claude_exe)
             else:
-                status = "failure"
-
-            finish_run(conn, run_id, status, session_id=session_id, total_cost_usd=total_cost)
-            self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status=status)
+                self._execute_headless_or_visible(
+                    conn, sched, run_id, prompts, claude_exe, skip_perms, terminal_mode
+                )
 
         except Exception as e:
             log.exception("Error executing schedule %s", schedule_id)
@@ -243,6 +187,127 @@ class SchedulerEngine:
             conn.close()
             with self._lock:
                 self._running_schedules.discard(schedule_id)
+
+    def _execute_headless_or_visible(
+        self, conn, sched, run_id, prompts, claude_exe, skip_perms, terminal_mode
+    ):
+        """Execute prompts in headless or visible mode (prompt chain with JSON capture)."""
+        schedule_id = sched["id"]
+        runner = run_prompt_visible if terminal_mode == "visible" else run_prompt
+
+        session_id = None
+        total_cost = 0.0
+        all_success = True
+        any_success = False
+
+        for i, prompt in enumerate(prompts):
+            pr_id = create_prompt_result(
+                conn, run_id, prompt["id"], prompt["prompt_order"], prompt["prompt_text"]
+            )
+            update_prompt_result(conn, pr_id, "running")
+            self._notify("prompt_started", schedule_id=schedule_id, run_id=run_id, prompt_order=i)
+
+            kwargs = dict(
+                prompt_text=prompt["prompt_text"],
+                working_dir=sched["working_dir"],
+                session_id=session_id,
+                claude_executable=claude_exe,
+                skip_permissions=skip_perms,
+            )
+            if terminal_mode == "visible":
+                kwargs["schedule_name"] = sched["name"]
+
+            resp = runner(**kwargs)
+
+            if resp.success:
+                update_prompt_result(
+                    conn, pr_id, "success",
+                    result_text=resp.result_text,
+                    result_json=resp.result_json,
+                    cost_usd=resp.cost_usd,
+                    duration_ms=resp.duration_ms,
+                )
+                if resp.session_id:
+                    session_id = resp.session_id
+                total_cost += resp.cost_usd
+                any_success = True
+            else:
+                update_prompt_result(
+                    conn, pr_id, "failure",
+                    error_message=resp.error_message,
+                    cost_usd=resp.cost_usd,
+                    duration_ms=resp.duration_ms,
+                )
+                total_cost += resp.cost_usd
+                all_success = False
+                # Skip remaining prompts
+                for j in range(i + 1, len(prompts)):
+                    skip_id = create_prompt_result(
+                        conn, run_id, prompts[j]["id"],
+                        prompts[j]["prompt_order"], prompts[j]["prompt_text"],
+                    )
+                    update_prompt_result(conn, skip_id, "skipped",
+                                         error_message="Skipped due to previous failure")
+                break
+
+            self._notify("prompt_finished", schedule_id=schedule_id, run_id=run_id, prompt_order=i)
+
+        # Determine overall status
+        if all_success:
+            status = "success"
+        elif any_success:
+            status = "partial_failure"
+        else:
+            status = "failure"
+
+        finish_run(conn, run_id, status, session_id=session_id, total_cost_usd=total_cost)
+        self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status=status)
+
+    def _execute_interactive(self, conn, sched, run_id, prompts, claude_exe):
+        """Execute in interactive mode — launch Claude TUI with the first prompt."""
+        schedule_id = sched["id"]
+        first_prompt = prompts[0]
+
+        # Create prompt result for the first prompt
+        pr_id = create_prompt_result(
+            conn, run_id, first_prompt["id"], first_prompt["prompt_order"],
+            first_prompt["prompt_text"]
+        )
+        update_prompt_result(conn, pr_id, "running")
+        self._notify("prompt_started", schedule_id=schedule_id, run_id=run_id, prompt_order=0)
+
+        resp = run_interactive(
+            working_dir=sched["working_dir"],
+            claude_executable=claude_exe,
+            initial_prompt=first_prompt["prompt_text"],
+            schedule_name=sched["name"],
+        )
+
+        if resp.success:
+            update_prompt_result(
+                conn, pr_id, "success",
+                result_text=resp.result_text,
+                duration_ms=resp.duration_ms,
+            )
+        else:
+            update_prompt_result(
+                conn, pr_id, "failure",
+                error_message=resp.error_message,
+                duration_ms=resp.duration_ms,
+            )
+
+        # Mark remaining prompts as skipped (interactive mode uses only the first)
+        for j in range(1, len(prompts)):
+            skip_id = create_prompt_result(
+                conn, run_id, prompts[j]["id"],
+                prompts[j]["prompt_order"], prompts[j]["prompt_text"],
+            )
+            update_prompt_result(conn, skip_id, "skipped",
+                                 error_message="Skipped — interactive mode uses first prompt only")
+
+        status = "success" if resp.success else "failure"
+        finish_run(conn, run_id, status, session_id=resp.session_id)
+        self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status=status)
 
     def _notify(self, event: str, **kwargs):
         if self.ui_callback:
