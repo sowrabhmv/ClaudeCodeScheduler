@@ -40,6 +40,15 @@ STATUS_LABELS = {
 }
 DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
+# Terminal mode options
+TERMINAL_MODE_VALUES = ["headless", "visible", "interactive"]
+TERMINAL_MODE_LABELS = ["Headless", "Visible", "Interactive"]
+TERMINAL_MODE_DESCRIPTIONS = {
+    "headless": "Runs completely hidden. Full JSON output captured. No user interaction.",
+    "visible": "Opens a console window to watch Claude work (read-only). Full JSON output captured.",
+    "interactive": "Opens Claude TUI for full interaction. Only first prompt is used. Limited output capture.",
+}
+
 
 class App(ctk.CTk):
     def __init__(self, db_path: str, engine: SchedulerEngine, start_hidden: bool = False):
@@ -205,7 +214,14 @@ class App(ctk.CTk):
         freq_text += f" at {sched['scheduled_time']}"
         prompts_text = f"{len(sched.get('prompts', []))} prompt(s)"
 
-        ctk.CTkLabel(detail, text=f"{freq_text}  |  {prompts_text}  |  {sched['working_dir']}",
+        # Terminal mode label
+        mode_val = sched.get("terminal_mode", "headless")
+        if mode_val in TERMINAL_MODE_VALUES:
+            mode_label = TERMINAL_MODE_LABELS[TERMINAL_MODE_VALUES.index(mode_val)]
+        else:
+            mode_label = "Headless"
+
+        ctk.CTkLabel(detail, text=f"{freq_text}  |  {prompts_text}  |  {mode_label}  |  {sched['working_dir']}",
                      font=ctk.CTkFont(size=11), text_color="#95a5a6").pack(side="left")
 
         # Buttons
@@ -530,7 +546,7 @@ class ScheduleDialog(ctk.CTkToplevel):
         self._prompts: list[str] = []
 
         self.title("Edit Schedule" if schedule_id else "New Schedule")
-        self.geometry("600x650")
+        self.geometry("600x720")
         self.resizable(False, False)
         self.grab_set()
 
@@ -578,6 +594,23 @@ class ScheduleDialog(ctk.CTkToplevel):
         self.entry_time.insert(0, "09:00")
         self.entry_time.pack(**pad)
 
+        # Terminal Mode
+        ctk.CTkLabel(self, text="Terminal Mode", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 2), **pad)
+        mode_frame = ctk.CTkFrame(self, fg_color="transparent")
+        mode_frame.pack(fill="x", padx=15)
+
+        self.var_terminal_mode = ctk.StringVar(value="Headless")
+        self.combo_terminal_mode = ctk.CTkComboBox(
+            mode_frame, values=TERMINAL_MODE_LABELS,
+            variable=self.var_terminal_mode, width=150,
+            command=self._on_terminal_mode_change)
+        self.combo_terminal_mode.pack(side="left")
+
+        self.lbl_terminal_desc = ctk.CTkLabel(
+            mode_frame, text=TERMINAL_MODE_DESCRIPTIONS["headless"],
+            font=ctk.CTkFont(size=11), text_color="#95a5a6", wraplength=400)
+        self.lbl_terminal_desc.pack(side="left", padx=10)
+
         # Prompts
         ctk.CTkLabel(self, text="Prompts (executed in order — type text or load a .md file)",
                      font=ctk.CTkFont(weight="bold")).pack(pady=(10, 2), **pad)
@@ -615,6 +648,11 @@ class ScheduleDialog(ctk.CTkToplevel):
             if self._dow_visible:
                 self.combo_dow.pack_forget()
                 self._dow_visible = False
+
+    def _on_terminal_mode_change(self, value: str):
+        idx = TERMINAL_MODE_LABELS.index(value) if value in TERMINAL_MODE_LABELS else 0
+        mode_val = TERMINAL_MODE_VALUES[idx]
+        self.lbl_terminal_desc.configure(text=TERMINAL_MODE_DESCRIPTIONS[mode_val])
 
     def _browse_dir(self):
         d = filedialog.askdirectory()
@@ -697,6 +735,13 @@ class ScheduleDialog(ctk.CTkToplevel):
         self.entry_time.delete(0, "end")
         self.entry_time.insert(0, sched["scheduled_time"])
 
+        # Load terminal mode
+        mode_val = sched.get("terminal_mode", "headless")
+        if mode_val in TERMINAL_MODE_VALUES:
+            idx = TERMINAL_MODE_VALUES.index(mode_val)
+            self.var_terminal_mode.set(TERMINAL_MODE_LABELS[idx])
+            self._on_terminal_mode_change(TERMINAL_MODE_LABELS[idx])
+
         for p in sched.get("prompts", []):
             self._add_prompt(p["prompt_text"])
 
@@ -730,13 +775,18 @@ class ScheduleDialog(ctk.CTkToplevel):
             messagebox.showwarning("Validation", "At least one prompt is required.")
             return
 
+        # Extract terminal mode value
+        mode_label = self.var_terminal_mode.get()
+        idx = TERMINAL_MODE_LABELS.index(mode_label) if mode_label in TERMINAL_MODE_LABELS else 0
+        terminal_mode = TERMINAL_MODE_VALUES[idx]
+
         conn = get_connection(self.db_path)
         if self.schedule_id:
             update_schedule(conn, self.schedule_id, name, working_dir, frequency,
-                            scheduled_time, day_of_week, prompts)
+                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode)
         else:
             create_schedule(conn, name, working_dir, frequency,
-                            scheduled_time, day_of_week, prompts)
+                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode)
         conn.close()
 
         if self.on_save:
@@ -780,6 +830,21 @@ class RunDetailDialog(ctk.CTkToplevel):
         if cost > 0:
             ctk.CTkLabel(summary, text=f"Cost: ${cost:.4f}",
                          font=ctk.CTkFont(size=12)).pack(side="left", padx=10)
+
+        # Show terminal mode
+        run_mode = run.get("terminal_mode", "headless")
+        if run_mode in TERMINAL_MODE_VALUES:
+            mode_display = TERMINAL_MODE_LABELS[TERMINAL_MODE_VALUES.index(run_mode)]
+        else:
+            mode_display = "Headless"
+        ctk.CTkLabel(summary, text=f"Mode: {mode_display}",
+                     font=ctk.CTkFont(size=12), text_color="#95a5a6").pack(side="left", padx=10)
+
+        # Interactive mode note
+        if run_mode == "interactive":
+            ctk.CTkLabel(self, text="(Interactive session — limited output capture)",
+                         font=ctk.CTkFont(size=11, slant="italic"),
+                         text_color="#f39c12").pack(padx=15, anchor="w")
 
         # Prompt tabs
         if results:
