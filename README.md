@@ -13,6 +13,7 @@ A Windows desktop app for scheduling prompts that run on [Claude Code CLI](https
 - **Schedule prompts** to run on Claude Code CLI at set times (once, hourly, daily, weekly)
 - **Chain multiple prompts** per schedule — uses `--resume` to continue the same session
 - **Use `.md` files as prompts** — reference Markdown files that are read at runtime (edit the file, next run picks up changes)
+- **Terminal mode** — choose per-schedule how Claude runs: **Headless** (hidden), **Visible** (watch in console), or **Interactive** (full TUI)
 - **Runs with `--dangerously-skip-permissions`** by default for full autonomous execution (configurable)
 - **System tray** — minimizes to tray, shows status, notifications on completion/failure
 - **Runs on Windows startup** — auto-registers in `HKCU\...\Run` to launch in background on boot
@@ -103,20 +104,39 @@ See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for detai
    - **Working Directory** — the folder Claude CLI runs in (use Browse)
    - **Frequency** — once, hourly, daily, or weekly
    - **Time** — HH:MM format
+   - **Terminal Mode** — how Claude runs (see [Terminal Modes](#terminal-modes) below)
 3. Add prompts:
    - **"+ Add Prompt"** — type prompt text directly
    - **"+ Add .md File"** — select a Markdown file (read at runtime, so edits are picked up)
    - Each prompt entry also has a **".md"** button to swap it to a file reference
 4. Click **Save**
 
+### Terminal Modes
+
+Each schedule can be configured with one of three terminal modes:
+
+| Mode | Window | User Interaction | Output Capture | Use Case |
+|------|--------|------------------|----------------|----------|
+| **Headless** (default) | None — runs hidden | None | Full JSON response | Fully automated, unattended runs |
+| **Visible** | Console window opens | Read-only (watch) | Full JSON via temp file | Monitor progress in real-time |
+| **Interactive** | Console window opens | Full Claude TUI | Session ID + exit code | Hands-on sessions where you guide Claude |
+
+**Headless** runs completely in the background with `CREATE_NO_WINDOW`. This is the default and matches the original behavior.
+
+**Visible** opens a console window titled "Claude Code - \<schedule name\>" so you can watch Claude work. Output is still captured as JSON and appears in History with full response details.
+
+**Interactive** launches the full Claude TUI in a new console window. Only the first prompt is used (as an initial message). You interact with Claude directly — ask follow-up questions, approve actions, etc. Remaining prompts in the schedule are skipped. There is no timeout; the run completes when you exit Claude. History shows the session ID and exit code but not full response text.
+
 ### Prompt Chaining
 
-When a schedule has multiple prompts, they execute in order within the same Claude session:
+When a schedule has multiple prompts (in **Headless** or **Visible** mode), they execute in order within the same Claude session:
 
 - **First prompt:** `claude -p "prompt" --dangerously-skip-permissions --output-format json`
 - **Subsequent prompts:** `claude -p "prompt" --resume <session_id> --dangerously-skip-permissions --output-format json`
 
 If any prompt fails, remaining prompts are **skipped** and the run is marked as **Partial Failure**.
+
+> **Note:** In **Interactive** mode, only the first prompt is sent as an initial message. The user controls the session from there, so prompt chaining does not apply.
 
 ### Using `.md` Files as Prompts
 
@@ -201,9 +221,9 @@ Stored as `scheduler.db` in the app directory:
 
 | Table | Purpose |
 |-------|---------|
-| `schedules` | Name, directory, frequency, time, enabled |
+| `schedules` | Name, directory, frequency, time, terminal mode, enabled |
 | `schedule_prompts` | Ordered prompt list per schedule |
-| `runs` | Execution history with status and cost |
+| `runs` | Execution history with status, cost, and terminal mode |
 | `prompt_results` | Per-prompt status, response, errors |
 | `settings` | Key-value app configuration |
 
