@@ -170,7 +170,7 @@ class SchedulerEngine:
                 return
 
             if terminal_mode == "interactive":
-                self._execute_interactive(conn, sched, run_id, prompts, claude_exe)
+                self._execute_interactive(conn, sched, run_id, prompts, claude_exe, skip_perms)
             else:
                 self._execute_headless_or_visible(
                     conn, sched, run_id, prompts, claude_exe, skip_perms, terminal_mode
@@ -263,7 +263,7 @@ class SchedulerEngine:
         finish_run(conn, run_id, status, session_id=session_id, total_cost_usd=total_cost)
         self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status=status)
 
-    def _execute_interactive(self, conn, sched, run_id, prompts, claude_exe):
+    def _execute_interactive(self, conn, sched, run_id, prompts, claude_exe, skip_perms=True):
         """Execute in interactive mode — launch Claude TUI with the first prompt."""
         schedule_id = sched["id"]
         first_prompt = prompts[0]
@@ -281,6 +281,7 @@ class SchedulerEngine:
             claude_executable=claude_exe,
             initial_prompt=first_prompt["prompt_text"],
             schedule_name=sched["name"],
+            skip_permissions=skip_perms,
         )
 
         if resp.success:
