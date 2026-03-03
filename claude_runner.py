@@ -318,6 +318,7 @@ def run_interactive(
     session_id: Optional[str] = None,
     initial_prompt: Optional[str] = None,
     schedule_name: str = "",
+    skip_permissions: bool = True,
 ) -> PromptResponse:
     """
     Launch Claude in interactive TUI mode in a new console window.
@@ -359,6 +360,8 @@ def run_interactive(
                 f"$Host.UI.RawUI.WindowTitle = '{window_title.replace(chr(39), chr(39)+chr(39))}'",
                 f"$args_list = @('--session-id', '{session_id}')",
             ]
+            if skip_permissions:
+                ps_lines.append("$args_list += '--dangerously-skip-permissions'")
 
             if actual_prompt:
                 prompt_file = os.path.join(tmp_dir, "prompt.txt")
@@ -383,6 +386,8 @@ def run_interactive(
             )
         else:
             cmd = [claude_executable, "--session-id", session_id]
+            if skip_permissions:
+                cmd.append("--dangerously-skip-permissions")
             if actual_prompt:
                 cmd.append(actual_prompt)
             proc = subprocess.Popen(cmd, cwd=cwd)
