@@ -4,7 +4,10 @@ __pycache__/
 *.pyo
 *.egg-info/
 dist/
+dist_new/
+dist_old/
 build/
+build_new/
 *.spec
 *.egg
 
