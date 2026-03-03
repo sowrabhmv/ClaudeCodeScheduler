@@ -12,6 +12,16 @@ from typing import Optional
 CREATE_NEW_CONSOLE = 0x00000010  # Windows flag for new console window
 
 
+def _find_powershell() -> str:
+    """Return the best available PowerShell executable (pwsh > powershell)."""
+    import shutil
+    # Prefer PowerShell 7+ (pwsh) if installed, fall back to Windows PowerShell 5.1
+    for exe in ("pwsh.exe", "powershell.exe"):
+        if shutil.which(exe):
+            return exe
+    return "powershell.exe"  # fallback, should always exist on Windows 10/11
+
+
 @dataclass
 class PromptResponse:
     success: bool = False
@@ -181,8 +191,8 @@ def run_prompt_visible(
     """
     Run a prompt in a visible console window. Output is captured via a temp file.
 
-    A new console window opens with the schedule name in the title bar.
-    The user can watch Claude work but cannot interact (read-only).
+    Uses PowerShell to launch a new console window with the schedule name as title.
+    The prompt is written to a temp file to avoid all shell escaping issues.
     JSON output is redirected to a temp file and parsed after completion.
     """
     response = PromptResponse()
@@ -194,43 +204,62 @@ def run_prompt_visible(
         response.error_message = str(e)
         return response
 
-    cmd_parts = [claude_executable, "-p", actual_prompt]
-    if skip_permissions:
-        cmd_parts.append("--dangerously-skip-permissions")
-    cmd_parts.extend(["--output-format", "json"])
-    if session_id:
-        cmd_parts.extend(["--resume", session_id])
-
     start_ms = time.monotonic_ns() // 1_000_000
 
-    # Create temp file for output capture
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="claude_visible_")
-    os.close(tmp_fd)
+    # Create temp files: prompt input, JSON output, and PowerShell script
+    tmp_dir = tempfile.mkdtemp(prefix="claude_visible_")
+    prompt_file = os.path.join(tmp_dir, "prompt.txt")
+    output_file = os.path.join(tmp_dir, "output.json")
+    script_file = os.path.join(tmp_dir, "run.ps1")
 
     try:
         cwd = working_dir if os.path.isdir(working_dir) else "."
         window_title = f"Claude Code - {schedule_name}" if schedule_name else "Claude Code"
 
-        if os.name == "nt":
-            # Build a cmd.exe wrapper that sets the window title and redirects output
-            escaped_parts = []
-            for part in cmd_parts:
-                # Escape double quotes inside arguments for cmd.exe
-                escaped = part.replace('"', '\\"')
-                escaped_parts.append(f'"{escaped}"')
-            inner_cmd = " ".join(escaped_parts)
-            shell_cmd = f'cmd.exe /c "title {window_title} && {inner_cmd} > "{tmp_path}" 2>&1"'
+        # Write prompt to file (avoids all escaping issues)
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(actual_prompt)
 
+        if os.name == "nt":
+            # Build PowerShell script
+            ps_lines = [
+                f"$Host.UI.RawUI.WindowTitle = '{window_title.replace(chr(39), chr(39)+chr(39))}'",
+                f"$prompt = Get-Content -Path '{prompt_file}' -Raw -Encoding UTF8",
+                f"$args_list = @('-p', $prompt)",
+            ]
+            if skip_permissions:
+                ps_lines.append("$args_list += '--dangerously-skip-permissions'")
+            ps_lines.append("$args_list += '--output-format'")
+            ps_lines.append("$args_list += 'json'")
+            if session_id:
+                ps_lines.append("$args_list += '--resume'")
+                ps_lines.append(f"$args_list += '{session_id}'")
+            ps_lines.append(
+                f"& '{claude_executable}' @args_list 2>&1 "
+                f"| Out-File -FilePath '{output_file}' -Encoding UTF8"
+            )
+            ps_lines.append(f"exit $LASTEXITCODE")
+
+            with open(script_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(ps_lines))
+
+            ps_exe = _find_powershell()
             proc = subprocess.Popen(
-                shell_cmd,
+                [ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_file],
                 cwd=cwd,
                 creationflags=CREATE_NEW_CONSOLE,
             )
         else:
-            # On non-Windows, just run with output redirect
+            # On non-Windows, run directly with output redirect
+            cmd_parts = [claude_executable, "-p", actual_prompt]
+            if skip_permissions:
+                cmd_parts.append("--dangerously-skip-permissions")
+            cmd_parts.extend(["--output-format", "json"])
+            if session_id:
+                cmd_parts.extend(["--resume", session_id])
             proc = subprocess.Popen(
                 cmd_parts,
-                stdout=open(tmp_path, "w"),
+                stdout=open(output_file, "w"),
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
             )
@@ -241,8 +270,11 @@ def run_prompt_visible(
 
         # Read output from temp file
         try:
-            with open(tmp_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(output_file, "r", encoding="utf-8", errors="replace") as f:
                 raw = f.read().strip()
+                # PowerShell Out-File may add a UTF-8 BOM — strip it
+                if raw.startswith("\ufeff"):
+                    raw = raw[1:]
         except Exception:
             raw = ""
 
@@ -270,9 +302,10 @@ def run_prompt_visible(
         response.error_message = f"Unexpected error: {e}"
 
     finally:
-        # Clean up temp file
+        # Clean up temp directory
+        import shutil
         try:
-            os.unlink(tmp_path)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         except OSError:
             pass
 
@@ -289,6 +322,7 @@ def run_interactive(
     """
     Launch Claude in interactive TUI mode in a new console window.
 
+    Uses PowerShell to open a new console with the schedule name as title.
     The user gets full Claude TUI interaction. No -p flag, no --output-format json.
     Uses --session-id for session tracking. No timeout — user controls the session.
     Returns session ID, duration, and exit code.
@@ -298,13 +332,11 @@ def run_interactive(
     if session_id is None:
         session_id = str(uuid.uuid4())
 
-    cmd = [claude_executable, "--session-id", session_id]
-
-    # If there's an initial prompt, pass it as a positional argument
+    # Resolve initial prompt if provided
+    actual_prompt = None
     if initial_prompt:
         try:
             actual_prompt = resolve_prompt_text(initial_prompt)
-            cmd.append(actual_prompt)
         except FileNotFoundError as e:
             response.success = False
             response.is_error = True
@@ -313,25 +345,46 @@ def run_interactive(
 
     start_ms = time.monotonic_ns() // 1_000_000
 
+    # Create temp directory for script and prompt file
+    tmp_dir = tempfile.mkdtemp(prefix="claude_interactive_")
+    script_file = os.path.join(tmp_dir, "run.ps1")
+
     try:
         cwd = working_dir if os.path.isdir(working_dir) else "."
         window_title = f"Claude Code - {schedule_name}" if schedule_name else "Claude Code (Interactive)"
 
         if os.name == "nt":
-            # Build cmd.exe wrapper with title
-            escaped_parts = []
-            for part in cmd:
-                escaped = part.replace('"', '\\"')
-                escaped_parts.append(f'"{escaped}"')
-            inner_cmd = " ".join(escaped_parts)
-            shell_cmd = f'cmd.exe /c "title {window_title} && {inner_cmd}"'
+            # Build PowerShell script for interactive mode
+            ps_lines = [
+                f"$Host.UI.RawUI.WindowTitle = '{window_title.replace(chr(39), chr(39)+chr(39))}'",
+                f"$args_list = @('--session-id', '{session_id}')",
+            ]
 
+            if actual_prompt:
+                prompt_file = os.path.join(tmp_dir, "prompt.txt")
+                with open(prompt_file, "w", encoding="utf-8") as f:
+                    f.write(actual_prompt)
+                ps_lines.append(
+                    f"$prompt = Get-Content -Path '{prompt_file}' -Raw -Encoding UTF8"
+                )
+                ps_lines.append("$args_list += $prompt")
+
+            ps_lines.append(f"& '{claude_executable}' @args_list")
+            ps_lines.append("exit $LASTEXITCODE")
+
+            with open(script_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(ps_lines))
+
+            ps_exe = _find_powershell()
             proc = subprocess.Popen(
-                shell_cmd,
+                [ps_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_file],
                 cwd=cwd,
                 creationflags=CREATE_NEW_CONSOLE,
             )
         else:
+            cmd = [claude_executable, "--session-id", session_id]
+            if actual_prompt:
+                cmd.append(actual_prompt)
             proc = subprocess.Popen(cmd, cwd=cwd)
 
         # Wait indefinitely — user controls when to exit
@@ -358,6 +411,14 @@ def run_interactive(
         response.success = False
         response.is_error = True
         response.error_message = f"Unexpected error: {e}"
+
+    finally:
+        # Clean up temp directory
+        import shutil
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except OSError:
+            pass
 
     return response
 
