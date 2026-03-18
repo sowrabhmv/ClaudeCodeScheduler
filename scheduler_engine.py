@@ -10,7 +10,9 @@ from database import (
     get_connection, get_all_schedules, get_schedule, get_setting,
     create_run, finish_run, create_prompt_result, update_prompt_result,
 )
-from claude_runner import run_prompt, run_prompt_visible, run_interactive, PromptResponse
+import claude_runner
+import copilot_runner
+from claude_runner import PromptResponse
 
 log = logging.getLogger("scheduler_engine")
 
@@ -156,11 +158,22 @@ class SchedulerEngine:
     def _execute_schedule(self, sched: dict):
         schedule_id = sched["id"]
         terminal_mode = sched.get("terminal_mode", "headless")
+        cli_provider = sched.get("cli_provider", "claude")
         conn = get_connection(self.db_path)
         try:
-            claude_exe = get_setting(conn, "claude_executable", "claude")
-            skip_perms = get_setting(conn, "dangerously_skip_permissions", "true") == "true"
-            run_id = create_run(conn, schedule_id, terminal_mode=terminal_mode)
+            # Load provider-specific settings
+            if cli_provider == "copilot":
+                exe = get_setting(conn, "copilot_executable", "copilot")
+                skip_perms = get_setting(conn, "copilot_skip_permissions", "true") == "true"
+                use_autopilot = get_setting(conn, "copilot_autopilot", "true") == "true"
+                max_continues = int(get_setting(conn, "copilot_max_continues", "50"))
+            else:
+                exe = get_setting(conn, "claude_executable", "claude")
+                skip_perms = get_setting(conn, "dangerously_skip_permissions", "true") == "true"
+                use_autopilot = False
+                max_continues = 0
+
+            run_id = create_run(conn, schedule_id, terminal_mode=terminal_mode, cli_provider=cli_provider)
             self._notify("run_started", schedule_id=schedule_id, run_id=run_id)
 
             prompts = sched.get("prompts", [])
@@ -170,10 +183,13 @@ class SchedulerEngine:
                 return
 
             if terminal_mode == "interactive":
-                self._execute_interactive(conn, sched, run_id, prompts, claude_exe, skip_perms)
+                self._execute_interactive(
+                    conn, sched, run_id, prompts, exe, skip_perms, cli_provider=cli_provider
+                )
             else:
                 self._execute_headless_or_visible(
-                    conn, sched, run_id, prompts, claude_exe, skip_perms, terminal_mode
+                    conn, sched, run_id, prompts, exe, skip_perms, terminal_mode,
+                    cli_provider=cli_provider, use_autopilot=use_autopilot, max_continues=max_continues,
                 )
 
         except Exception as e:
@@ -189,11 +205,17 @@ class SchedulerEngine:
                 self._running_schedules.discard(schedule_id)
 
     def _execute_headless_or_visible(
-        self, conn, sched, run_id, prompts, claude_exe, skip_perms, terminal_mode
+        self, conn, sched, run_id, prompts, exe, skip_perms, terminal_mode,
+        cli_provider="claude", use_autopilot=False, max_continues=0,
     ):
-        """Execute prompts in headless or visible mode (prompt chain with JSON capture)."""
+        """Execute prompts in headless or visible mode (prompt chain with output capture)."""
         schedule_id = sched["id"]
-        runner = run_prompt_visible if terminal_mode == "visible" else run_prompt
+
+        # Select the correct runner module and function
+        if cli_provider == "copilot":
+            runner = copilot_runner.run_prompt_visible if terminal_mode == "visible" else copilot_runner.run_prompt
+        else:
+            runner = claude_runner.run_prompt_visible if terminal_mode == "visible" else claude_runner.run_prompt
 
         session_id = None
         total_cost = 0.0
@@ -207,15 +229,28 @@ class SchedulerEngine:
             update_prompt_result(conn, pr_id, "running")
             self._notify("prompt_started", schedule_id=schedule_id, run_id=run_id, prompt_order=i)
 
-            kwargs = dict(
-                prompt_text=prompt["prompt_text"],
-                working_dir=sched["working_dir"],
-                session_id=session_id,
-                claude_executable=claude_exe,
-                skip_permissions=skip_perms,
-            )
-            if terminal_mode == "visible":
-                kwargs["schedule_name"] = sched["name"]
+            if cli_provider == "copilot":
+                kwargs = dict(
+                    prompt_text=prompt["prompt_text"],
+                    working_dir=sched["working_dir"],
+                    is_continuation=(i > 0),
+                    copilot_executable=exe,
+                    skip_permissions=skip_perms,
+                    use_autopilot=use_autopilot,
+                    max_continues=max_continues,
+                )
+                if terminal_mode == "visible":
+                    kwargs["schedule_name"] = sched["name"]
+            else:
+                kwargs = dict(
+                    prompt_text=prompt["prompt_text"],
+                    working_dir=sched["working_dir"],
+                    session_id=session_id,
+                    claude_executable=exe,
+                    skip_permissions=skip_perms,
+                )
+                if terminal_mode == "visible":
+                    kwargs["schedule_name"] = sched["name"]
 
             resp = runner(**kwargs)
 
@@ -263,8 +298,8 @@ class SchedulerEngine:
         finish_run(conn, run_id, status, session_id=session_id, total_cost_usd=total_cost)
         self._notify("run_finished", schedule_id=schedule_id, run_id=run_id, status=status)
 
-    def _execute_interactive(self, conn, sched, run_id, prompts, claude_exe, skip_perms=True):
-        """Execute in interactive mode — launch Claude TUI with the first prompt."""
+    def _execute_interactive(self, conn, sched, run_id, prompts, exe, skip_perms=True, cli_provider="claude"):
+        """Execute in interactive mode — launch CLI TUI with the first prompt."""
         schedule_id = sched["id"]
         first_prompt = prompts[0]
 
@@ -276,13 +311,22 @@ class SchedulerEngine:
         update_prompt_result(conn, pr_id, "running")
         self._notify("prompt_started", schedule_id=schedule_id, run_id=run_id, prompt_order=0)
 
-        resp = run_interactive(
-            working_dir=sched["working_dir"],
-            claude_executable=claude_exe,
-            initial_prompt=first_prompt["prompt_text"],
-            schedule_name=sched["name"],
-            skip_permissions=skip_perms,
-        )
+        if cli_provider == "copilot":
+            resp = copilot_runner.run_interactive(
+                working_dir=sched["working_dir"],
+                copilot_executable=exe,
+                initial_prompt=first_prompt["prompt_text"],
+                schedule_name=sched["name"],
+                skip_permissions=skip_perms,
+            )
+        else:
+            resp = claude_runner.run_interactive(
+                working_dir=sched["working_dir"],
+                claude_executable=exe,
+                initial_prompt=first_prompt["prompt_text"],
+                schedule_name=sched["name"],
+                skip_permissions=skip_perms,
+            )
 
         if resp.success:
             update_prompt_result(

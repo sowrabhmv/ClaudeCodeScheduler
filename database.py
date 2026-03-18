@@ -74,6 +74,7 @@ def init_db(conn: sqlite3.Connection):
     """)
     _migrate_add_terminal_mode(conn)
     _migrate_add_run_terminal_mode(conn)
+    _migrate_add_cli_provider(conn)
     # Seed default settings
     defaults = {
         "check_interval_seconds": "30",
@@ -84,6 +85,10 @@ def init_db(conn: sqlite3.Connection):
         "claude_executable": "claude",
         "dangerously_skip_permissions": "true",
         "history_retention_days": "90",
+        "copilot_executable": "copilot",
+        "copilot_skip_permissions": "true",
+        "copilot_autopilot": "true",
+        "copilot_max_continues": "50",
     }
     for k, v in defaults.items():
         conn.execute(
@@ -105,6 +110,19 @@ def _migrate_add_run_terminal_mode(conn: sqlite3.Connection):
     cols = [row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
     if "terminal_mode" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN terminal_mode TEXT NOT NULL DEFAULT 'headless'")
+        conn.commit()
+
+
+def _migrate_add_cli_provider(conn: sqlite3.Connection):
+    """Add cli_provider column to schedules and runs tables if it doesn't exist."""
+    sched_cols = [row[1] for row in conn.execute("PRAGMA table_info(schedules)").fetchall()]
+    if "cli_provider" not in sched_cols:
+        conn.execute("ALTER TABLE schedules ADD COLUMN cli_provider TEXT NOT NULL DEFAULT 'claude'")
+        conn.commit()
+
+    run_cols = [row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
+    if "cli_provider" not in run_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN cli_provider TEXT NOT NULL DEFAULT 'claude'")
         conn.commit()
 
 
@@ -133,11 +151,12 @@ def create_schedule(
     day_of_week: Optional[int],
     prompts: list[str],
     terminal_mode: str = "headless",
+    cli_provider: str = "claude",
 ) -> int:
     cur = conn.execute(
-        """INSERT INTO schedules(name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode),
+        """INSERT INTO schedules(name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode, cli_provider)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode, cli_provider),
     )
     schedule_id = cur.lastrowid
     for i, prompt in enumerate(prompts):
@@ -159,11 +178,12 @@ def update_schedule(
     day_of_week: Optional[int],
     prompts: list[str],
     terminal_mode: str = "headless",
+    cli_provider: str = "claude",
 ):
     conn.execute(
         """UPDATE schedules SET name=?, working_dir=?, frequency=?, scheduled_time=?,
-           day_of_week=?, terminal_mode=?, updated_at=datetime('now') WHERE id=?""",
-        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode, schedule_id),
+           day_of_week=?, terminal_mode=?, cli_provider=?, updated_at=datetime('now') WHERE id=?""",
+        (name, working_dir, frequency, scheduled_time, day_of_week, terminal_mode, cli_provider, schedule_id),
     )
     conn.execute("DELETE FROM schedule_prompts WHERE schedule_id=?", (schedule_id,))
     for i, prompt in enumerate(prompts):
@@ -222,9 +242,9 @@ def get_schedule(conn: sqlite3.Connection, schedule_id: int) -> Optional[dict]:
 
 # ── Runs ──────────────────────────────────────────────────────────────────
 
-def create_run(conn: sqlite3.Connection, schedule_id: int, terminal_mode: str = "headless") -> int:
+def create_run(conn: sqlite3.Connection, schedule_id: int, terminal_mode: str = "headless", cli_provider: str = "claude") -> int:
     cur = conn.execute(
-        "INSERT INTO runs(schedule_id, terminal_mode) VALUES (?, ?)", (schedule_id, terminal_mode)
+        "INSERT INTO runs(schedule_id, terminal_mode, cli_provider) VALUES (?, ?, ?)", (schedule_id, terminal_mode, cli_provider)
     )
     conn.commit()
     return cur.lastrowid

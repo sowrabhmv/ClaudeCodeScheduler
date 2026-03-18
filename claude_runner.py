@@ -234,10 +234,32 @@ def run_prompt_visible(
             if session_id:
                 ps_lines.append("$args_list += '--resume'")
                 ps_lines.append(f"$args_list += '{session_id}'")
+            # Status banner so the console window is not blank
+            ps_lines.append("Write-Host '--- Claude Code Scheduler ---' -ForegroundColor Cyan")
+            ps_lines.append("Write-Host ''")
+            # Run Claude — stdout (JSON) captured to file, stderr (progress) shows in console
             ps_lines.append(
-                f"& '{claude_executable}' @args_list 2>&1 "
+                f"& '{claude_executable}' @args_list "
                 f"| Out-File -FilePath '{output_file}' -Encoding UTF8"
             )
+            # Display result summary in the console window
+            ps_lines.append(
+                f"$rawContent = Get-Content -Path '{output_file}' -Raw "
+                f"-Encoding UTF8 -ErrorAction SilentlyContinue"
+            )
+            ps_lines.append("if ($rawContent) {")
+            ps_lines.append("  try {")
+            ps_lines.append("    $jsonObj = $rawContent | ConvertFrom-Json")
+            ps_lines.append("    if ($jsonObj.is_error) {")
+            ps_lines.append("      Write-Host '' ; Write-Host 'Error:' -ForegroundColor Red")
+            ps_lines.append("      if ($jsonObj.result -is [string]) { Write-Host $jsonObj.result }")
+            ps_lines.append("    } else {")
+            ps_lines.append("      Write-Host '' ; Write-Host 'Result:' -ForegroundColor Green")
+            ps_lines.append("      if ($jsonObj.result -is [string]) { Write-Host $jsonObj.result }")
+            ps_lines.append("    }")
+            ps_lines.append("  } catch { Write-Host $rawContent }")
+            ps_lines.append("}")
+            ps_lines.append("Write-Host '' ; Write-Host 'Done.' -ForegroundColor Cyan")
             ps_lines.append(f"exit $LASTEXITCODE")
 
             with open(script_file, "w", encoding="utf-8") as f:

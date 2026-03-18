@@ -49,6 +49,14 @@ TERMINAL_MODE_DESCRIPTIONS = {
     "interactive": "Opens Claude TUI for full interaction. Only first prompt is used. Limited output capture.",
 }
 
+# CLI Provider options
+CLI_PROVIDER_VALUES = ["claude", "copilot"]
+CLI_PROVIDER_LABELS = ["Claude Code", "GitHub Copilot"]
+CLI_PROVIDER_DESCRIPTIONS = {
+    "claude": "Uses Claude Code CLI. Supports JSON output, cost tracking, and session resume.",
+    "copilot": "Uses GitHub Copilot CLI. Text output only, no cost tracking. Uses --continue for chaining.",
+}
+
 
 class App(ctk.CTk):
     def __init__(self, db_path: str, engine: SchedulerEngine, start_hidden: bool = False):
@@ -221,7 +229,14 @@ class App(ctk.CTk):
         else:
             mode_label = "Headless"
 
-        ctk.CTkLabel(detail, text=f"{freq_text}  |  {prompts_text}  |  {mode_label}  |  {sched['working_dir']}",
+        # CLI provider label
+        provider_val = sched.get("cli_provider", "claude")
+        if provider_val in CLI_PROVIDER_VALUES:
+            provider_label = CLI_PROVIDER_LABELS[CLI_PROVIDER_VALUES.index(provider_val)]
+        else:
+            provider_label = "Claude Code"
+
+        ctk.CTkLabel(detail, text=f"{freq_text}  |  {prompts_text}  |  {mode_label}  |  {provider_label}  |  {sched['working_dir']}",
                      font=ctk.CTkFont(size=11), text_color="#95a5a6").pack(side="left")
 
         # Buttons
@@ -329,16 +344,29 @@ class App(ctk.CTk):
         ctk.CTkLabel(inner, text=run.get("schedule_name", "?"),
                      font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=10)
 
+        # Provider
+        run_provider = run.get("cli_provider", "claude")
+        if run_provider in CLI_PROVIDER_VALUES:
+            provider_display = CLI_PROVIDER_LABELS[CLI_PROVIDER_VALUES.index(run_provider)]
+        else:
+            provider_display = "Claude Code"
+        ctk.CTkLabel(inner, text=provider_display, font=ctk.CTkFont(size=11),
+                     text_color="#7f8c8d").pack(side="left", padx=10)
+
         # Time
         started = run.get("started_at", "")
         ctk.CTkLabel(inner, text=started, font=ctk.CTkFont(size=11),
                      text_color="#95a5a6").pack(side="left", padx=10)
 
         # Cost
-        cost = run.get("total_cost_usd", 0) or 0
-        if cost > 0:
-            ctk.CTkLabel(inner, text=f"${cost:.4f}", font=ctk.CTkFont(size=11),
+        if run_provider == "copilot":
+            ctk.CTkLabel(inner, text="N/A", font=ctk.CTkFont(size=11),
                          text_color="#95a5a6").pack(side="left", padx=10)
+        else:
+            cost = run.get("total_cost_usd", 0) or 0
+            if cost > 0:
+                ctk.CTkLabel(inner, text=f"${cost:.4f}", font=ctk.CTkFont(size=11),
+                             text_color="#95a5a6").pack(side="left", padx=10)
 
         # View details
         ctk.CTkButton(inner, text="Details", width=60, height=26,
@@ -360,19 +388,53 @@ class App(ctk.CTk):
 
         conn = get_connection(self.db_path)
 
-        # Claude executable
-        ctk.CTkLabel(form, text="Claude CLI Executable",
-                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(10, 2))
+        # ── Claude Code CLI section ──
+        ctk.CTkLabel(form, text="Claude Code CLI",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(10, 4))
+
+        ctk.CTkLabel(form, text="Executable",
+                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(4, 2))
         self._settings_claude_exe = ctk.CTkEntry(form, width=400)
         self._settings_claude_exe.insert(0, get_setting(conn, "claude_executable", "claude"))
         self._settings_claude_exe.pack(anchor="w")
 
-        # Dangerously skip permissions
         self._settings_skip_perms = ctk.CTkSwitch(
             form, text="Use --dangerously-skip-permissions (allows full autonomous execution)")
         if get_setting(conn, "dangerously_skip_permissions", "true") == "true":
             self._settings_skip_perms.select()
         self._settings_skip_perms.pack(anchor="w", pady=(10, 4))
+
+        # ── GitHub Copilot CLI section ──
+        ctk.CTkLabel(form, text="GitHub Copilot CLI",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(20, 4))
+
+        ctk.CTkLabel(form, text="Executable",
+                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(4, 2))
+        self._settings_copilot_exe = ctk.CTkEntry(form, width=400)
+        self._settings_copilot_exe.insert(0, get_setting(conn, "copilot_executable", "copilot"))
+        self._settings_copilot_exe.pack(anchor="w")
+
+        self._settings_copilot_yolo = ctk.CTkSwitch(
+            form, text="Use --yolo (skip permission prompts)")
+        if get_setting(conn, "copilot_skip_permissions", "true") == "true":
+            self._settings_copilot_yolo.select()
+        self._settings_copilot_yolo.pack(anchor="w", pady=(10, 4))
+
+        self._settings_copilot_autopilot = ctk.CTkSwitch(
+            form, text="Use --autopilot (autonomous execution)")
+        if get_setting(conn, "copilot_autopilot", "true") == "true":
+            self._settings_copilot_autopilot.select()
+        self._settings_copilot_autopilot.pack(anchor="w", pady=(4, 4))
+
+        ctk.CTkLabel(form, text="Max Autopilot Continues",
+                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(10, 2))
+        self._settings_copilot_max_continues = ctk.CTkEntry(form, width=100)
+        self._settings_copilot_max_continues.insert(0, get_setting(conn, "copilot_max_continues", "50"))
+        self._settings_copilot_max_continues.pack(anchor="w")
+
+        # ── Scheduler section ──
+        ctk.CTkLabel(form, text="Scheduler",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(20, 4))
 
         # Check interval
         ctk.CTkLabel(form, text="Check Interval (seconds)",
@@ -421,8 +483,15 @@ class App(ctk.CTk):
 
     def _save_settings(self):
         conn = get_connection(self.db_path)
+        # Claude settings
         set_setting(conn, "claude_executable", self._settings_claude_exe.get().strip())
         set_setting(conn, "dangerously_skip_permissions", "true" if self._settings_skip_perms.get() else "false")
+        # Copilot settings
+        set_setting(conn, "copilot_executable", self._settings_copilot_exe.get().strip())
+        set_setting(conn, "copilot_skip_permissions", "true" if self._settings_copilot_yolo.get() else "false")
+        set_setting(conn, "copilot_autopilot", "true" if self._settings_copilot_autopilot.get() else "false")
+        set_setting(conn, "copilot_max_continues", self._settings_copilot_max_continues.get().strip())
+        # Scheduler settings
         set_setting(conn, "check_interval_seconds", self._settings_interval.get().strip())
         set_setting(conn, "history_retention_days", self._settings_retention.get().strip())
         set_setting(conn, "run_on_startup", "true" if self._settings_startup.get() else "false")
@@ -546,7 +615,7 @@ class ScheduleDialog(ctk.CTkToplevel):
         self._prompts: list[str] = []
 
         self.title("Edit Schedule" if schedule_id else "New Schedule")
-        self.geometry("600x720")
+        self.geometry("600x780")
         self.resizable(False, False)
         self.grab_set()
 
@@ -571,6 +640,23 @@ class ScheduleDialog(ctk.CTkToplevel):
         self.entry_dir.insert(0, ".")
         ctk.CTkButton(dir_frame, text="Browse", width=60,
                       command=self._browse_dir).pack(side="left", padx=5)
+
+        # CLI Provider
+        ctk.CTkLabel(self, text="CLI Provider", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 2), **pad)
+        provider_frame = ctk.CTkFrame(self, fg_color="transparent")
+        provider_frame.pack(fill="x", padx=15)
+
+        self.var_cli_provider = ctk.StringVar(value="Claude Code")
+        self.combo_cli_provider = ctk.CTkComboBox(
+            provider_frame, values=CLI_PROVIDER_LABELS,
+            variable=self.var_cli_provider, width=150,
+            command=self._on_cli_provider_change)
+        self.combo_cli_provider.pack(side="left")
+
+        self.lbl_provider_desc = ctk.CTkLabel(
+            provider_frame, text=CLI_PROVIDER_DESCRIPTIONS["claude"],
+            font=ctk.CTkFont(size=11), text_color="#95a5a6", wraplength=380)
+        self.lbl_provider_desc.pack(side="left", padx=10)
 
         # Frequency
         ctk.CTkLabel(self, text="Frequency", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 2), **pad)
@@ -648,6 +734,11 @@ class ScheduleDialog(ctk.CTkToplevel):
             if self._dow_visible:
                 self.combo_dow.pack_forget()
                 self._dow_visible = False
+
+    def _on_cli_provider_change(self, value: str):
+        idx = CLI_PROVIDER_LABELS.index(value) if value in CLI_PROVIDER_LABELS else 0
+        provider_val = CLI_PROVIDER_VALUES[idx]
+        self.lbl_provider_desc.configure(text=CLI_PROVIDER_DESCRIPTIONS[provider_val])
 
     def _on_terminal_mode_change(self, value: str):
         idx = TERMINAL_MODE_LABELS.index(value) if value in TERMINAL_MODE_LABELS else 0
@@ -742,6 +833,13 @@ class ScheduleDialog(ctk.CTkToplevel):
             self.var_terminal_mode.set(TERMINAL_MODE_LABELS[idx])
             self._on_terminal_mode_change(TERMINAL_MODE_LABELS[idx])
 
+        # Load CLI provider
+        provider_val = sched.get("cli_provider", "claude")
+        if provider_val in CLI_PROVIDER_VALUES:
+            idx = CLI_PROVIDER_VALUES.index(provider_val)
+            self.var_cli_provider.set(CLI_PROVIDER_LABELS[idx])
+            self._on_cli_provider_change(CLI_PROVIDER_LABELS[idx])
+
         for p in sched.get("prompts", []):
             self._add_prompt(p["prompt_text"])
 
@@ -780,13 +878,20 @@ class ScheduleDialog(ctk.CTkToplevel):
         idx = TERMINAL_MODE_LABELS.index(mode_label) if mode_label in TERMINAL_MODE_LABELS else 0
         terminal_mode = TERMINAL_MODE_VALUES[idx]
 
+        # Extract CLI provider value
+        provider_label = self.var_cli_provider.get()
+        idx = CLI_PROVIDER_LABELS.index(provider_label) if provider_label in CLI_PROVIDER_LABELS else 0
+        cli_provider = CLI_PROVIDER_VALUES[idx]
+
         conn = get_connection(self.db_path)
         if self.schedule_id:
             update_schedule(conn, self.schedule_id, name, working_dir, frequency,
-                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode)
+                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode,
+                            cli_provider=cli_provider)
         else:
             create_schedule(conn, name, working_dir, frequency,
-                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode)
+                            scheduled_time, day_of_week, prompts, terminal_mode=terminal_mode,
+                            cli_provider=cli_provider)
         conn.close()
 
         if self.on_save:
@@ -826,10 +931,25 @@ class RunDetailDialog(ctk.CTkToplevel):
                      text_color=color).pack(side="left", padx=10)
         ctk.CTkLabel(summary, text=f"Started: {run.get('started_at', '?')}",
                      font=ctk.CTkFont(size=12)).pack(side="left", padx=10)
-        cost = run.get("total_cost_usd", 0) or 0
-        if cost > 0:
-            ctk.CTkLabel(summary, text=f"Cost: ${cost:.4f}",
-                         font=ctk.CTkFont(size=12)).pack(side="left", padx=10)
+
+        # Provider
+        run_provider = run.get("cli_provider", "claude")
+        if run_provider in CLI_PROVIDER_VALUES:
+            provider_display = CLI_PROVIDER_LABELS[CLI_PROVIDER_VALUES.index(run_provider)]
+        else:
+            provider_display = "Claude Code"
+        ctk.CTkLabel(summary, text=f"CLI: {provider_display}",
+                     font=ctk.CTkFont(size=12), text_color="#7f8c8d").pack(side="left", padx=10)
+
+        # Cost
+        if run_provider == "copilot":
+            ctk.CTkLabel(summary, text="Cost: N/A",
+                         font=ctk.CTkFont(size=12), text_color="#95a5a6").pack(side="left", padx=10)
+        else:
+            cost = run.get("total_cost_usd", 0) or 0
+            if cost > 0:
+                ctk.CTkLabel(summary, text=f"Cost: ${cost:.4f}",
+                             font=ctk.CTkFont(size=12)).pack(side="left", padx=10)
 
         # Show terminal mode
         run_mode = run.get("terminal_mode", "headless")
@@ -839,6 +959,12 @@ class RunDetailDialog(ctk.CTkToplevel):
             mode_display = "Headless"
         ctk.CTkLabel(summary, text=f"Mode: {mode_display}",
                      font=ctk.CTkFont(size=12), text_color="#95a5a6").pack(side="left", padx=10)
+
+        # Copilot note
+        if run_provider == "copilot":
+            ctk.CTkLabel(self, text="(Copilot CLI — text output only, no cost tracking)",
+                         font=ctk.CTkFont(size=11, slant="italic"),
+                         text_color="#f39c12").pack(padx=15, anchor="w")
 
         # Interactive mode note
         if run_mode == "interactive":
